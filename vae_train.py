@@ -1,8 +1,9 @@
 """
- @file: train.py
- @Time    : 2023/1/11
+ @file: vae_train.py
+ @Time    : 2023/1/12
  @Author  : Peinuan qin
  """
+
 import os.path
 import torch.cuda
 import torchvision
@@ -12,22 +13,25 @@ from torchvision import transforms
 from torchvision.datasets import MNIST
 import numpy as np
 from util import MyDataset
-from torch.nn import MSELoss
-from torch.optim import Adadelta
-from models import EncoderDecoder
+from torch.nn import MSELoss, KLDivLoss
+from torch.distributions import kl_divergence, Normal
+from torch.optim import Adadelta, Adam
+from models import VAE
 import matplotlib.pyplot as plt
 import cv2
+import torch.nn.functional as F
 
 DATA_ROOT = "./data"
-SAVE_ROOT = "./saved"
+SAVE_ROOT = "./saved_vae"
 MEAN = (0.1307,)
 STD = (0.3081,)
-DATASET_RATIO = 0.2
+DATASET_RATIO = 1
 BATCHSIZE = 64
 FIXED_LENGTH = 4
 EPOCHS = 10
-LR = 1
+LR = 0.001
 SAVE_FREQ = 100
+PRINT_FREQ = 100
 
 
 def transfer_to_uint8(img):
@@ -103,22 +107,25 @@ def main():
 
     # only use 0.2 of the raw data for training and validation
 
-    train_set = MyDataset(trainset, ratio=DATASET_RATIO)
-    val_set = MyDataset(valset, ratio=DATASET_RATIO)
+    train_set = MyDataset(trainset, ratio=DATASET_RATIO, add_noise=False)
+    val_set = MyDataset(valset, ratio=DATASET_RATIO, add_noise=False)
 
     train_loader = DataLoader(train_set
                               , batch_size=BATCHSIZE
                               , shuffle=True
-                              , num_workers=4)
+                              , num_workers=1)
 
     val_loader = DataLoader(val_set
                             , batch_size=BATCHSIZE
                             , shuffle=True
-                            , num_workers=4)
+                            , num_workers=1)
 
-    model = EncoderDecoder()
-    criterion = MSELoss()
-    optim = Adadelta(model.parameters(), LR)
+    model = VAE()
+    # mse_criterion = MSELoss()
+    # mse_criterion = F.binary_cross_entropy
+    mse_criterion = F.binary_cross_entropy_with_logits
+    kl_criterion = kl_divergence
+    optim = Adam(model.parameters(), LR)
 
     # training and validation
     for epoch in range(EPOCHS):
@@ -128,20 +135,37 @@ def main():
             data = data.to(device)
             label = label.to(device)
 
-            output = model(data)
+            distribution, output = model(data)
 
-            loss = criterion(output, label)
-            print(f"Train-Epoch: {epoch}, step:{i}, loss:{loss.item()}")
+            # use normal distribution N~(0,1) to regularize the output distribution of the encoder
+            distribution_loss = kl_criterion(distribution, Normal(0, 1)).sum(-1).mean()
+
+            # re-constructive loss of the decoder generation
+            # reconstructive_loss = mse_criterion(output, label)
+            reconstructive_loss = mse_criterion(output, label, size_average=False)
+
+            alpha = 1
+            beta = 1
+
+            vae_loss = alpha * distribution_loss + beta * reconstructive_loss
+
+            if i % PRINT_FREQ == 0:
+
+                print(f"Train-Epoch: {epoch}"
+                      f", step:{i}"
+                      f", vae_loss:{vae_loss.item()}"
+                      f", distribution_loss: {distribution_loss.item()}"
+                      f", reconstructive_loss: {reconstructive_loss.item()}")
 
             optim.zero_grad()
-            loss.backward()
+            vae_loss.backward()
             optim.step()
 
             # every 100 steps, check to what extent the denoise ability is trained
             if i % SAVE_FREQ == 0:
                 with torch.no_grad():
-                    batch_img_show_and_save(data.cpu(), "noise", "train", epoch, i)
-                    batch_img_show_and_save(output.cpu(), "denoise", "train", epoch, i)
+                    batch_img_show_and_save(data.cpu(), "raw", "train", epoch, i)
+                    batch_img_show_and_save(output.cpu(), "gen", "train", epoch, i)
 
         # evaluation
         for i, (data, label) in tqdm.tqdm(enumerate(val_loader)):
@@ -150,14 +174,31 @@ def main():
             data = data.to(device)
             label = label.to(device)
 
-            output = model(data)
-            loss = criterion(output, label)
-            print(f"Val-Epoch: {epoch}, step: {i}, loss: {loss.item()}")
+            distribution, output = model(data)
+
+            # use normal distribution N~(0,1) to regularize the output distribution of the encoder
+            distribution_loss = kl_criterion(distribution, Normal(0, 1)).sum(-1).mean()
+
+            # re-constructive loss of the decoder generation
+            # reconstructive_loss = mse_criterion(output, label)
+            reconstructive_loss =mse_criterion(output, label, size_average=False)
+
+            alpha = 1
+            beta = 1
+
+            vae_loss = alpha * distribution_loss + beta * reconstructive_loss
+
+            if i % PRINT_FREQ == 0:
+                print(f"Val-Epoch: {epoch}"
+                      f", step:{i}"
+                      f", vae_loss:{vae_loss.item()}"
+                      f", distribution_loss: {distribution_loss.item()}"
+                      f", reconstructive_loss: {reconstructive_loss.item()}")
 
             if i % SAVE_FREQ == 0:
                 with torch.no_grad():
-                    batch_img_show_and_save(data.cpu(), "noise", "val", epoch, i)
-                    batch_img_show_and_save(output.cpu(), "denoise", "val", epoch, i)
+                    batch_img_show_and_save(data.cpu(), "raw", "val", epoch, i)
+                    batch_img_show_and_save(output.cpu(), "gen", "val", epoch, i)
 
 
 if __name__ == '__main__':

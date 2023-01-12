@@ -10,8 +10,9 @@ import numpy as np
 
 
 class MyDataset(Dataset):
-    def __init__(self, dataset, ratio=0.2):
+    def __init__(self, dataset, ratio=0.2, add_noise=True):
         self.dataset = dataset
+        self.add_noise = add_noise
         if ratio:
             random_indexs = random.sample(range(len(dataset)), int(ratio * len(dataset)))
             self.dataset = Subset(dataset, random_indexs)
@@ -22,7 +23,10 @@ class MyDataset(Dataset):
 
     def __getitem__(self, item):
         # noise image as the encoder-decoder input, and the clean image as the groundtruth label
-        return self.make_noise(self.dataset[item][0]), self.dataset[item][0]
+        if self.add_noise:
+            return self.make_noise(self.dataset[item][0]), self.dataset[item][0]
+        else:
+            return self.dataset[item][0], self.dataset[item][0]
 
     def make_noise(self, x):
         """
@@ -34,3 +38,4 @@ class MyDataset(Dataset):
         noise = torch.from_numpy(noise)
         x += noise
         return x
+
